@@ -1,0 +1,200 @@
+.card {
+  overflow: hidden;
+  padding: 21px;
+  border: 1px solid #e9efea;
+  border-radius: 15px;
+  background: #fff;
+  box-shadow: 0 4px 15px rgba(34, 61, 42, 0.025);
+}
+
+.heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 19px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: #6b8b70;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.heading h2 {
+  margin: 0;
+  color: #26382b;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.04em;
+}
+
+.heading p:last-child {
+  max-width: 520px;
+  margin: 7px 0 0;
+  color: #849087;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.position {
+  display: grid;
+  flex: 0 0 auto;
+  min-width: 88px;
+  gap: 2px;
+  padding: 10px 13px;
+  border: 1px solid #e1eee2;
+  border-radius: 12px;
+  color: #54785a;
+  background: #f4faf4;
+  text-align: center;
+}
+
+.position span {
+  font-size: 9px;
+}
+
+.position strong {
+  color: #315d43;
+  font-size: 20px;
+}
+
+.list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: 34px 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 12px;
+  border: 1px solid #edf1ed;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.currentStudent {
+  border-color: #cfe2d1;
+  background: #f6faf6;
+}
+
+.rank {
+  color: #7c887f;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.topRank {
+  display: grid;
+  place-items: center;
+}
+
+.rankCup {
+  width: 19px;
+  height: 19px;
+  fill: currentColor;
+}
+
+.goldRank {
+  color: #c6922e;
+}
+
+.silverRank {
+  color: #89949b;
+}
+
+.bronzeRank {
+  color: #a66a3f;
+}
+
+.avatar {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 50%;
+  color: #416b4b;
+  background: #eaf3eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.student {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.student strong {
+  overflow: hidden;
+  color: #3d4c41;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student small {
+  color: #929c94;
+  font-size: 9px;
+}
+
+.points {
+  color: #416b4b;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.message,
+.error {
+  margin: 0;
+  padding: 16px;
+  border-radius: 11px;
+  color: #758078;
+  background: #f7faf7;
+  font-size: 11px;
+  text-align: center;
+}
+
+.error {
+  color: #a23d35;
+  background: #fff4f2;
+}
+
+@media (max-width: 520px) {
+  .card {
+    padding: 16px;
+  }
+
+  .heading {
+    gap: 10px;
+  }
+
+  .heading h2 {
+    font-size: 16px;
+  }
+
+  .row {
+    grid-template-columns: 27px 32px minmax(0, 1fr) auto;
+    gap: 7px;
+    padding: 8px;
+  }
+
+  .avatar {
+    width: 30px;
+    height: 30px;
+  }
+
+  .points {
+    font-size: 10px;
+  }
+}

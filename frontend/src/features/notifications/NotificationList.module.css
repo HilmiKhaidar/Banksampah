@@ -1,0 +1,67 @@
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 9px 8px;
+}
+
+.list {
+  display: grid;
+}
+
+.notification {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 15px 9px;
+  border-bottom: 1px solid #f0f3f0;
+}
+
+.notification:last-child {
+  border-bottom: 0;
+}
+
+.unread {
+  border-radius: 10px;
+  background: #f6faf6;
+}
+
+.icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 11px;
+  color: #4d7955;
+  background: #edf6ee;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.notification strong {
+  color: #39493d;
+  font-size: 10px;
+}
+
+.notification p {
+  margin: 5px 0;
+  color: #78847b;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.notification small {
+  color: #a0aaa2;
+  font-size: 9px;
+}
+
+@media (max-width: 720px) {
+  .notification {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .notification > button {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
