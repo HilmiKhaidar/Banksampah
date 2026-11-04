@@ -35,7 +35,7 @@ Alternatively, open Laragon's MySQL terminal and run:
 SOURCE C:/path/to/BankSampah/backend/database/schema.sql;
 ```
 
-For a new database, the schema creates the `bank_sampah` database and Indonesian-named tables for accounts, deposits, points, rewards, and redemptions. It creates no sample records.
+For a new database, the schema creates the `bank_sampah` database and Indonesian-named tables for accounts, deposits, rupiah balances, withdrawals, and notifications. It creates no sample records.
 
 For a database created from the earlier English-named schema, run the data-preserving rename migration once instead of rerunning the schema:
 
@@ -45,13 +45,13 @@ Get-Content .\database\migrations\001_nama_indonesia.sql | mysql -u root -p
 
 The migration renames the existing tables, columns, indexes, and constraints in place; it does not delete table data.
 
-For a database already using Indonesian table names, apply the point-and-reward migration once:
+For an older database already using Indonesian table names, apply the historical migrations below in order. These migrations preserve the old point/reward tables and records for audit; the current API no longer reads or changes them. Existing point values are not converted into rupiah. Set cash rates explicitly before approving new deposits.
 
 ```powershell
 Get-Content .\database\migrations\002_poin_reward.sql | mysql -u root -p
 ```
 
-The migration preserves accounts, sessions, deposits, and existing monetary history. Old prices and deposit amounts are renamed to `harga_per_satuan_arsip` and `nominal_arsip`; they are not converted into points. Monetary transactions and withdrawal requests are retained in `arsip_transaksi_saldo` and `arsip_pengajuan_pencairan`. New points use `transaksi_poin`, reward definitions use `katalog_reward`, and redemption requests use `pengajuan_penukaran`. Existing waste types start with a point rate of `0`, which must be set by the manager before awarding points.
+This historical migration preserves accounts, sessions, deposits, and existing monetary history. Old prices and deposit amounts are renamed to `harga_per_satuan_arsip` and `nominal_arsip`; these values are not interpreted as points or converted. Existing monetary transactions and withdrawal requests remain in `arsip_transaksi_saldo` and `arsip_pengajuan_pencairan`. The legacy point/reward tables created by this migration are not used by the current application.
 
 Then apply the persistent notification preference, photo database, and temporary-password migrations in order:
 
@@ -64,9 +64,7 @@ Get-Content .\database\migrations\007_nilai_konversi_poin.sql | mysql -u root -p
 Get-Content .\database\migrations\008_hapus_satuan_pcs.sql | mysql -u root -p
 ```
 
-Migration `003` stores in-app notification preferences on each account. Migration `004` adds MySQL blob storage for uploaded waste-type and deposit photos. Migration `005` marks imported student accounts as requiring a password change at first login.
-Migration `007` adds the manager-controlled estimated rupiah value for each point. The conversion is informational and does not create a cash balance or a withdrawal.
-Migration `008` disables any existing waste type using the removed `buah/pcs` unit while preserving it and its historical deposit records. New and edited waste types can use only kilograms or liters.
+Migration `003` stores in-app notification preferences on each account. Migration `004` adds MySQL blob storage for uploaded waste-type and deposit photos. Migration `005` marks imported student accounts as requiring a password change at first login. Migration `008` disables waste types using the removed `buah/pcs` unit while preserving historical deposit records. Migration `007` is retained as a historical settings migration; conversion settings are no longer read by the application.
 
 Inspect tables and record counts from MySQL CLI:
 
@@ -75,9 +73,9 @@ USE bank_sampah;
 SHOW TABLES;
 SELECT 'akun' AS nama_tabel, COUNT(*) AS jumlah FROM akun
 UNION ALL SELECT 'jenis_sampah', COUNT(*) FROM jenis_sampah
-UNION ALL SELECT 'transaksi_poin', COUNT(*) FROM transaksi_poin
-UNION ALL SELECT 'katalog_reward', COUNT(*) FROM katalog_reward
-UNION ALL SELECT 'pengajuan_penukaran', COUNT(*) FROM pengajuan_penukaran;
+UNION ALL SELECT 'pengajuan_setoran', COUNT(*) FROM pengajuan_setoran
+UNION ALL SELECT 'arsip_transaksi_saldo', COUNT(*) FROM arsip_transaksi_saldo
+UNION ALL SELECT 'arsip_pengajuan_pencairan', COUNT(*) FROM arsip_pengajuan_pencairan;
 ```
 
 ## Install and run
@@ -102,6 +100,7 @@ When opening the frontend from another device on the same network, use the front
 - `PUT /api/auth/password` changes the signed-in account's password and invalidates its other sessions.
 - `GET /api/auth/students` lists student accounts for a signed-in manager.
 - `POST /api/auth/students/import` imports up to 500 student records for a signed-in manager. The request contains `students` with `name`, `identifier` (NISN), and optional `className`. The one-time response includes random temporary passwords; accounts must change them at first login.
+- `POST /api/auth/students/:id/reset-password` (manager) accepts `{ temporaryPassword }` (8–128 characters), hashes it, revokes the participant's active sessions, and requires a password change at next login. The one-time response includes the temporary password.
 - `PATCH /api/auth/students/:id` updates a student's profile or active status.
 
 Successful login sets a seven-day, HttpOnly session cookie. Send requests from a browser with credentials enabled. The API stores scrypt password hashes and SHA-256 hashes of session tokens; it never returns either hash.
@@ -115,16 +114,15 @@ The frontend's login, session, profile, and password screens use this API. Stude
 
 All business endpoints require a valid session cookie. Manager-only endpoints are marked below.
 
-- `GET /api/business/data` returns the signed-in user's waste types, deposits, point ledger, rewards, redemption history, and notifications. Managers see all records; students see their own deposits/ledger/redemptions and active rewards.
-- `PATCH /api/business/conversion-rate` (manager) sets the estimated rupiah value of one point as `{ "rupiahPerPoint": 10 }`. The value is returned in `preferences.rupiahPerPoint` and is informational only; it does not add a withdrawable cash balance.
-- `GET /api/business/ranking/monthly` (student) returns active students ranked by points earned from approved deposits in the current month. Reward redemptions do not reduce the monthly score.
-- `POST /api/business/waste-types` (manager) creates a waste type. `PATCH /api/business/waste-types/:id` (manager) updates its name, unit, point rate, icon/image, and active state. Images can be compressed JPEG/PNG/WebP data URLs stored in MySQL or HTTP(S) URLs. `GET /api/business/waste-types/:id/image` serves stored images to signed-in users.
-- `POST /api/business/deposits` creates a pending deposit for the signed-in student from a list of waste type IDs and up to five compressed image data URLs. Deposit quantities are entered by the manager during review. Photos are stored in MySQL.
+- `GET /api/business/data` returns the signed-in user's waste types, deposits, rupiah ledger, withdrawal history, notifications, and preferences. Managers see all records; students see only their own ledger and withdrawals.
+- `POST /api/business/waste-types` (manager) creates a waste type. `PATCH /api/business/waste-types/:id` (manager) updates its name, unit, rupiah rate, icon/image, and active state. Images can be compressed JPEG/PNG/WebP data URLs stored in MySQL or HTTP(S) URLs. `GET /api/business/waste-types/:id/image` serves stored images to signed-in users.
+- `POST /api/business/deposits` creates a pending deposit for the signed-in student from a list of up to 20 waste type IDs and up to five compressed image data URLs. If no catalog type is available, send an empty `wasteTypeIds` array and a required `otherWasteDescription` (up to 120 characters); the manager maps it to an active, priced catalog type during review. Deposit quantities are entered by the manager during review. Photos are stored in MySQL.
 - `GET /api/business/deposits/:id/photos` returns stored photos for the owning student or a manager.
 - `POST /api/business/deposits/:id/cancel` cancels the signed-in student's pending deposit.
-- `POST /api/business/deposits/:id/review` (manager) accepts `{ decision, lines, note }` to approve with actual quantities, or `{ decision: "reject", note }` to reject. Approval stores the accepted quantities and rates and creates one point-ledger credit in a single database transaction.
-- `POST /api/business/rewards` (manager) creates a reward. `PATCH /api/business/rewards/:id` (manager) updates it.
-- `POST /api/business/redemptions` creates a pending redemption and reserves its points. `POST /api/business/redemptions/:id/review` (manager) approves or rejects it. Approval checks the available point balance, updates stock, and inserts the debit in a transaction. `POST /api/business/redemptions/:id/fulfill` (manager) marks an approved reward as manually handed over.
+- `POST /api/business/deposits/:id/review` (manager) accepts `{ decision, lines, note }` to approve with actual quantities (and map uncatalogued lines to an active, priced type), or `{ decision: "reject", note }` to reject. Approval stores the accepted quantities/rates and creates one rupiah-ledger credit in a single database transaction.
+- `POST /api/business/deposits/direct` (manager) accepts `{ studentId, wasteTypeId, quantity, note }` for a weighed deposit recorded directly by staff. The server validates the active student/catalog rate, calculates the rupiah amount, stores the approved deposit, credits the student ledger, and sends an in-app notification atomically.
+- `POST /api/business/withdrawals` creates a pending student withdrawal and reserves the requested balance. `PATCH /api/business/withdrawals/:id` edits a pending request; `POST /api/business/withdrawals/:id/cancel` cancels it.
+- `POST /api/business/withdrawals/:id/review` (manager) approves or rejects a pending request. `POST /api/business/withdrawals/:id/pay` (manager) records a completed manual transfer and debits the rupiah ledger.
 - `PATCH /api/business/notifications/read-all` and `PATCH /api/business/notifications/:id/read` mark the signed-in user's notifications as read.
 - `PATCH /api/business/preferences` stores `{ inAppNotifications }` on the signed-in account. `GET /api/business/data` returns that preference and the manager contact number from the account database.
 

@@ -23,6 +23,10 @@ function isAllowedOrigin(request, origin) {
 
 app.disable("x-powered-by");
 app.use(helmet());
+app.use("/api", (_request, response, next) => {
+  response.setHeader("Cache-Control", "no-store, private");
+  next();
+});
 app.use(cors((request, callback) => {
   const origin = request.get("origin");
   callback(null, {

@@ -330,6 +330,53 @@ router.post("/students/import", requireAuth, requireManager, async (request, res
   }
 });
 
+router.post("/students/:id/reset-password", requireAuth, requireManager, async (request, response, next) => {
+  let connection;
+  let transactionStarted = false;
+  try {
+    requireObjectBody(request.body);
+    const temporaryPassword = readPassword(request.body.temporaryPassword, "Kata sandi sementara");
+    const passwordHash = await hashPassword(temporaryPassword);
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const [students] = await connection.execute(
+      `SELECT id, nama AS name, identitas AS identifier
+       FROM akun
+       WHERE id = ? AND peran = 'peserta'
+       LIMIT 1
+       FOR UPDATE`,
+      [request.params.id],
+    );
+    if (students.length === 0) {
+      throw new ApiError(404, "STUDENT_NOT_FOUND", "Data peserta tidak ditemukan.");
+    }
+
+    await connection.execute(
+      `UPDATE akun
+       SET hash_kata_sandi = ?, wajib_ganti_kata_sandi = TRUE
+       WHERE id = ? AND peran = 'peserta'`,
+      [passwordHash, request.params.id],
+    );
+    await connection.execute("DELETE FROM sesi WHERE akun_id = ?", [request.params.id]);
+    await connection.commit();
+    transactionStarted = false;
+    response.json({
+      credential: {
+        name: students[0].name,
+        identifier: students[0].identifier,
+        temporaryPassword,
+      },
+    });
+  } catch (error) {
+    if (connection && transactionStarted) await connection.rollback();
+    next(error);
+  } finally {
+    connection?.release();
+  }
+});
+
 router.patch("/students/:id", requireAuth, requireManager, async (request, response, next) => {
   try {
     requireObjectBody(request.body);

@@ -7,7 +7,7 @@ const [{ pool }, { default: app }] = await Promise.all([
   import("../src/app.js"),
 ]);
 
-test("business API completes a deposit-to-redemption flow with point and stock checks", async (t) => {
+test("business API credits deposits to a rupiah balance and pays withdrawals", async (t) => {
   const [managers] = await pool.execute(
     "SELECT id FROM akun WHERE peran = 'pengelola' AND aktif = TRUE ORDER BY dibuat_pada LIMIT 1",
   );
@@ -19,23 +19,23 @@ test("business API completes a deposit-to-redemption flow with point and stock c
 
   const managerId = managers[0].id;
   const studentId = randomUUID();
-  const studentIdentifier = `business-test-${randomUUID()}`;
   const managerToken = randomUUID();
   const studentToken = randomUUID();
   const managerTokenHash = createHash("sha256").update(managerToken).digest("hex");
   const studentTokenHash = createHash("sha256").update(studentToken).digest("hex");
-  const uniqueSuffix = randomUUID();
-  const wasteName = `Test waste ${uniqueSuffix}`;
-  const rewardName = `Test reward ${uniqueSuffix}`;
-  let originalConversionSetting;
+  const suffix = randomUUID();
+  const studentIdentifier = `cash-test-${suffix}`;
   let wasteTypeId;
-  let rewardId;
+  let depositId;
+  let unlistedDepositId;
+  let rejectedDepositId;
+  let withdrawalId;
   let server;
 
   try {
     await pool.execute(
       `INSERT INTO akun (id, peran, nama, identitas, kelas, whatsapp, hash_kata_sandi)
-       VALUES (?, 'peserta', 'Business API Test Student', ?, 'Test', '080000000000', 'unused-test-hash')`,
+       VALUES (?, 'peserta', 'Cash API Test Student', ?, 'Test', '080000000000', 'unused-test-hash')`,
       [studentId, studentIdentifier],
     );
     await pool.execute(
@@ -63,237 +63,156 @@ test("business API completes a deposit-to-redemption flow with point and stock c
       return { response, body: await response.json() };
     }
 
-    const [conversionRows] = await pool.execute(
-      "SELECT rupiah_per_poin AS rupiahPerPoint, diperbarui_oleh AS updatedBy FROM pengaturan_bank_sampah WHERE id = 1",
-    );
-    originalConversionSetting = conversionRows[0];
-    const initialBusinessData = await request("/data");
-    assert.equal(initialBusinessData.body.preferences.rupiahPerPoint, originalConversionSetting.rupiahPerPoint === null
-      ? null
-      : Number(originalConversionSetting.rupiahPerPoint));
-    const updatedConversion = await request("/conversion-rate", {
-      method: "PATCH",
-      token: managerToken,
-      body: { rupiahPerPoint: 10 },
-    });
-    assert.equal(updatedConversion.response.status, 200);
-    assert.equal(updatedConversion.body.rupiahPerPoint, 10);
-    const forbiddenConversion = await request("/conversion-rate", {
-      method: "PATCH",
-      body: { rupiahPerPoint: 5 },
-    });
-    assert.equal(forbiddenConversion.response.status, 403);
-    const invalidConversion = await request("/conversion-rate", {
-      method: "PATCH",
-      token: managerToken,
-      body: { rupiahPerPoint: 0 },
-    });
-    assert.equal(invalidConversion.response.status, 400);
-    const dataAfterConversion = await request("/data");
-    assert.equal(dataAfterConversion.body.preferences.rupiahPerPoint, 10);
-
-    const rejectedPcsWaste = await request("/waste-types", {
+    const createdWasteType = await request("/waste-types", {
       method: "POST",
       token: managerToken,
-      body: {
-        name: `Test PCS waste ${uniqueSuffix}`,
-        unit: "buah",
-        pointsPerUnit: 1,
-      },
+      body: { name: `Cash test ${suffix}`, unit: "kg", pricePerUnit: 2_500 },
     });
-    assert.equal(rejectedPcsWaste.response.status, 400);
-    assert.equal(rejectedPcsWaste.body.error.code, "INVALID_UNIT");
+    assert.equal(createdWasteType.response.status, 201);
+    wasteTypeId = createdWasteType.body.wasteType.id;
 
-    const createdWaste = await request("/waste-types", {
+    const createdDeposit = await request("/deposits", {
       method: "POST",
-      token: managerToken,
-      body: {
-        name: wasteName,
-        unit: "kg",
-        pointsPerUnit: 12,
-        icon: "♻️",
-        image: "data:image/jpeg;base64,/9j/2Q==",
-      },
+      body: { wasteTypeIds: [wasteTypeId] },
     });
-    assert.equal(createdWaste.response.status, 201);
-    wasteTypeId = createdWaste.body.wasteType.id;
-    assert.match(createdWaste.body.wasteType.image, /^\/api\/business\/waste-types\/.+\/image$/);
-    const rejectedPcsUpdate = await request(`/waste-types/${wasteTypeId}`, {
-      method: "PATCH",
-      token: managerToken,
-      body: {
-        name: wasteName,
-        unit: "buah",
-        pointsPerUnit: 12,
-        icon: "♻️",
-        image: null,
-        active: true,
-      },
-    });
-    assert.equal(rejectedPcsUpdate.response.status, 400);
-    assert.equal(rejectedPcsUpdate.body.error.code, "INVALID_UNIT");
-    const wasteImage = await fetch(`http://127.0.0.1:${server.address().port}${createdWaste.body.wasteType.image}`, {
-      headers: { cookie: `bank_sampah_session=${studentToken}` },
-    });
-    assert.equal(wasteImage.status, 200);
-    assert.equal(wasteImage.headers.get("content-type"), "image/jpeg");
-    assert.equal(Buffer.from(await wasteImage.arrayBuffer()).toString("base64"), "/9j/2Q==");
+    assert.equal(createdDeposit.response.status, 201);
+    depositId = createdDeposit.body.deposit.id;
 
-    const createdReward = await request("/rewards", {
-      method: "POST",
-      token: managerToken,
-      body: {
-        name: rewardName,
-        description: "Business API integration test",
-        kind: "item",
-        pointsCost: 20,
-        stock: 2,
-        moneyAmount: null,
-      },
-    });
-    assert.equal(createdReward.response.status, 201);
-    rewardId = createdReward.body.reward.id;
-
-    const depositResult = await request("/deposits", {
-      method: "POST",
-      body: {
-        wasteTypeIds: [wasteTypeId],
-        photos: [{ name: "sample.jpg", dataUrl: "data:image/jpeg;base64,/9j/2Q==" }],
-      },
-    });
-    assert.equal(depositResult.response.status, 201);
-    const depositId = depositResult.body.deposit.id;
-    assert.equal(depositResult.body.deposit.photos.length, 0);
-    const depositPhotos = await request(`/deposits/${depositId}/photos`);
-    assert.deepEqual(depositPhotos.body.photos, ["data:image/jpeg;base64,/9j/2Q=="]);
-
-    const approval = await request(`/deposits/${depositId}/review`, {
+    const approvedDeposit = await request(`/deposits/${depositId}/review`, {
       method: "POST",
       token: managerToken,
       body: {
         decision: "approve",
-        lines: [{ wasteTypeId, quantity: 2.5 }],
+        lines: [{ wasteTypeId, quantity: 1.5 }],
         note: "",
       },
     });
-    assert.equal(approval.response.status, 200);
+    assert.equal(approvedDeposit.response.status, 200);
 
-    const afterDeposit = await request("/data");
-    assert.equal(afterDeposit.response.status, 200);
-    const depositEntry = afterDeposit.body.pointEntries.find((entry) => entry.depositId === depositId);
-    assert.equal(depositEntry.amount, 30);
-    const approvedDeposit = afterDeposit.body.deposits.find((entry) => entry.id === depositId);
-    assert.equal(approvedDeposit.status, "approved");
-    assert.equal(approvedDeposit.lines[0].quantity, 2.5);
-    assert.equal(approvedDeposit.lines[0].pointsAwarded, 30);
-    assert.equal(approvedDeposit.photoCount, 1);
-
-    const redemptionResult = await request("/redemptions", {
+    const emptyUnlistedDeposit = await request("/deposits", {
       method: "POST",
-      body: { rewardId },
+      body: { wasteTypeIds: [], otherWasteDescription: "  " },
     });
-    assert.equal(redemptionResult.response.status, 201);
-    const redemptionId = redemptionResult.body.redemptionRequest.id;
+    assert.equal(emptyUnlistedDeposit.response.status, 400);
 
-    const overReservedRequest = await request("/redemptions", {
+    const createdUnlistedDeposit = await request("/deposits", {
       method: "POST",
-      body: { rewardId },
+      body: { wasteTypeIds: [], otherWasteDescription: "Botol kaca warna hijau" },
     });
-    assert.equal(overReservedRequest.response.status, 409);
-    assert.equal(overReservedRequest.body.error.code, "INSUFFICIENT_POINTS");
+    assert.equal(createdUnlistedDeposit.response.status, 201);
+    unlistedDepositId = createdUnlistedDeposit.body.deposit.id;
+    assert.equal(createdUnlistedDeposit.body.deposit.lines[0].wasteTypeId, null);
+    assert.equal(createdUnlistedDeposit.body.deposit.lines[0].wasteTypeName, "Botol kaca warna hijau");
 
-    const redemptionApproval = await request(`/redemptions/${redemptionId}/review`, {
+    const approvedUnlistedDeposit = await request(`/deposits/${unlistedDepositId}/review`, {
+      method: "POST",
+      token: managerToken,
+      body: {
+        decision: "approve",
+        lines: [{ wasteTypeId, quantity: 0.5 }],
+        note: "",
+      },
+    });
+    assert.equal(approvedUnlistedDeposit.response.status, 200);
+
+    const createdRejectedDeposit = await request("/deposits", {
+      method: "POST",
+      body: { wasteTypeIds: [], otherWasteDescription: "Jenis yang tidak dapat diterima" },
+    });
+    assert.equal(createdRejectedDeposit.response.status, 201);
+    rejectedDepositId = createdRejectedDeposit.body.deposit.id;
+    const rejectedDeposit = await request(`/deposits/${rejectedDepositId}/review`, {
+      method: "POST",
+      token: managerToken,
+      body: { decision: "reject", note: "Tidak dapat diterima" },
+    });
+    assert.equal(rejectedDeposit.response.status, 200);
+
+    const balanceAfterDeposit = await request("/data");
+    assert.equal(
+      balanceAfterDeposit.body.walletEntries.reduce((sum, entry) => sum + entry.amount, 0),
+      5_000,
+    );
+    const mappedDeposit = balanceAfterDeposit.body.deposits.find((deposit) => deposit.id === unlistedDepositId);
+    assert.equal(mappedDeposit.lines[0].wasteTypeId, wasteTypeId);
+    assert.equal(mappedDeposit.lines[0].wasteTypeName, `Cash test ${suffix}`);
+    assert.equal(mappedDeposit.lines[0].amount, 1_250);
+    assert.equal(
+      balanceAfterDeposit.body.deposits.find((deposit) => deposit.id === rejectedDepositId).status,
+      "rejected",
+    );
+    assert.equal("pointEntries" in balanceAfterDeposit.body, false);
+    assert.equal("rewardCatalog" in balanceAfterDeposit.body, false);
+    assert.equal("preferences" in balanceAfterDeposit.body, true);
+
+    const createdWithdrawal = await request("/withdrawals", {
+      method: "POST",
+      body: {
+        amount: 3_000,
+        destinationType: "bank",
+        institution: "Test Bank",
+        accountName: "Cash API Test Student",
+        accountNumber: "1234567890",
+      },
+    });
+    assert.equal(createdWithdrawal.response.status, 201);
+    withdrawalId = createdWithdrawal.body.withdrawalRequest.id;
+
+    const oversizedEdit = await request(`/withdrawals/${withdrawalId}`, {
+      method: "PATCH",
+      body: {
+        amount: 6_000,
+        destinationType: "bank",
+        institution: "Test Bank",
+        accountName: "Cash API Test Student",
+        accountNumber: "1234567890",
+      },
+    });
+    assert.equal(oversizedEdit.response.status, 409);
+
+    const approvedWithdrawal = await request(`/withdrawals/${withdrawalId}/review`, {
       method: "POST",
       token: managerToken,
       body: { decision: "approve", note: "" },
     });
-    assert.equal(redemptionApproval.response.status, 200);
-    const duplicateApproval = await request(`/redemptions/${redemptionId}/review`, {
-      method: "POST",
-      token: managerToken,
-      body: { decision: "approve", note: "" },
-    });
-    assert.equal(duplicateApproval.response.status, 409);
+    assert.equal(approvedWithdrawal.response.status, 200);
 
-    const fulfillment = await request(`/redemptions/${redemptionId}/fulfill`, {
+    const paidWithdrawal = await request(`/withdrawals/${withdrawalId}/pay`, {
       method: "POST",
       token: managerToken,
     });
-    assert.equal(fulfillment.response.status, 200);
+    assert.equal(paidWithdrawal.response.status, 200);
 
     const finalData = await request("/data");
-    assert.equal(finalData.response.status, 200);
-    assert.equal(finalData.body.pointEntries.reduce((sum, entry) => sum + entry.amount, 0), 10);
-    const monthlyRanking = await request("/ranking/monthly");
-    assert.equal(monthlyRanking.response.status, 200);
-    assert.match(monthlyRanking.body.month, /^\d{4}-\d{2}$/);
     assert.equal(
-      monthlyRanking.body.ranking.find((entry) => entry.studentId === studentId).points,
-      30,
+      finalData.body.walletEntries.reduce((sum, entry) => sum + entry.amount, 0),
+      2_000,
     );
-    const managerRanking = await request("/ranking/monthly", { token: managerToken });
-    assert.equal(managerRanking.response.status, 403);
-    assert.equal(
-      finalData.body.redemptionRequests.find((entry) => entry.id === redemptionId).status,
-      "fulfilled",
-    );
-    const savedReward = finalData.body.rewards.find((entry) => entry.id === rewardId);
-    assert.equal(savedReward.stock, 1);
-    assert.equal(
-      finalData.body.pointEntries.filter((entry) => entry.redemptionId === redemptionId).length,
-      1,
-    );
-    assert.equal(finalData.body.preferences.inAppNotifications, true);
-    assert.equal(typeof finalData.body.preferences.managerWhatsapp, "string");
-    assert.equal(finalData.body.notifications.length > 0, true);
-    const disableNotifications = await request("/preferences", {
-      method: "PATCH",
-      body: { inAppNotifications: false },
-    });
-    assert.equal(disableNotifications.response.status, 200);
-    const preferencesData = await request("/data");
-    assert.equal(preferencesData.body.preferences.inAppNotifications, false);
-    assert.equal(preferencesData.body.notifications.length, 0);
-    const enableNotifications = await request("/preferences", {
-      method: "PATCH",
-      body: { inAppNotifications: true },
-    });
-    assert.equal(enableNotifications.response.status, 200);
-
+    assert.equal(finalData.body.withdrawalRequests[0].status, "paid");
+    assert.equal((await request("/rewards", { token: managerToken })).response.status, 404);
   } finally {
-    if (originalConversionSetting) {
-      await pool.execute(
-        `UPDATE pengaturan_bank_sampah
-         SET rupiah_per_poin = ?, diperbarui_oleh = ?
-         WHERE id = 1`,
-        [originalConversionSetting.rupiahPerPoint, originalConversionSetting.updatedBy],
-      );
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
     }
-    if (server?.listening) {
-      await new Promise((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      });
+    if (withdrawalId) {
+      await pool.execute("DELETE FROM arsip_transaksi_saldo WHERE pengajuan_pencairan_id = ?", [withdrawalId]);
+      await pool.execute("DELETE FROM arsip_pengajuan_pencairan WHERE id = ?", [withdrawalId]);
     }
-    await pool.execute(
-      `DELETE FROM notifikasi
-       WHERE penerima_id = ? OR id_terkait IN (
-         SELECT id FROM pengajuan_setoran WHERE peserta_id = ?
-         UNION
-         SELECT id FROM pengajuan_penukaran WHERE peserta_id = ?
-       )`,
-      [studentId, studentId, studentId],
-    );
-    await pool.execute("DELETE FROM transaksi_poin WHERE peserta_id = ?", [studentId]);
-    await pool.execute("DELETE FROM pengajuan_penukaran WHERE peserta_id = ?", [studentId]);
-    await pool.execute("DELETE FROM pengajuan_setoran WHERE peserta_id = ?", [studentId]);
-    if (rewardId) await pool.execute("DELETE FROM katalog_reward WHERE id = ?", [rewardId]);
-    else await pool.execute("DELETE FROM katalog_reward WHERE nama = ?", [rewardName]);
+    if (depositId) {
+      await pool.execute("DELETE FROM arsip_transaksi_saldo WHERE setoran_id = ?", [depositId]);
+      await pool.execute("DELETE FROM foto_setoran WHERE setoran_id = ?", [depositId]);
+      await pool.execute("DELETE FROM rincian_setoran WHERE setoran_id = ?", [depositId]);
+      await pool.execute("DELETE FROM pengajuan_setoran WHERE id = ?", [depositId]);
+    }
+    for (const id of [unlistedDepositId, rejectedDepositId]) {
+      if (!id) continue;
+      await pool.execute("DELETE FROM arsip_transaksi_saldo WHERE setoran_id = ?", [id]);
+      await pool.execute("DELETE FROM foto_setoran WHERE setoran_id = ?", [id]);
+      await pool.execute("DELETE FROM rincian_setoran WHERE setoran_id = ?", [id]);
+      await pool.execute("DELETE FROM pengajuan_setoran WHERE id = ?", [id]);
+    }
     if (wasteTypeId) await pool.execute("DELETE FROM jenis_sampah WHERE id = ?", [wasteTypeId]);
-    else await pool.execute("DELETE FROM jenis_sampah WHERE nama = ?", [wasteName]);
-    await pool.execute(
-      "DELETE FROM sesi WHERE hash_token IN (?, ?)",
-      [managerTokenHash, studentTokenHash],
-    );
+    await pool.execute("DELETE FROM sesi WHERE hash_token IN (?, ?)", [managerTokenHash, studentTokenHash]);
     await pool.execute("DELETE FROM akun WHERE id = ?", [studentId]);
     await pool.end();
   }

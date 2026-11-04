@@ -97,11 +97,11 @@ function readQuantity(value, unit) {
   return parsed;
 }
 
-function calculatePoints(quantity, rate) {
+function calculateAmount(quantity, rate) {
   const scaledQuantity = BigInt(Math.round(quantity * 1000));
-  const points = (scaledQuantity * BigInt(rate)) / 1000n;
-  if (points < 1n || points > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return Number(points);
+  const amount = (scaledQuantity * BigInt(rate) + 500n) / 1000n;
+  if (amount < 0n || amount > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(amount);
 }
 
 function toSafeNumber(value, field) {
@@ -117,7 +117,7 @@ function mapWasteType(row) {
     id: row.id,
     name: row.name,
     unit: row.unit,
-    pointsPerUnit: toSafeNumber(row.pointsPerUnit, "Tarif poin"),
+    pricePerUnit: row.pricePerUnit === null ? 0 : toSafeNumber(row.pricePerUnit, "Tarif rupiah"),
     icon: row.icon ?? "♻️",
     image: row.imageUrl ?? (row.hasImageBlob ? `/api/business/waste-types/${row.id}/image` : null),
     active: Boolean(row.active) && row.unit !== "buah",
@@ -146,51 +146,35 @@ function mapDeposit(row, lines) {
       wasteTypeName: line.wasteTypeName,
       unit: line.unit,
       quantity: line.quantity === null ? null : Number(line.quantity),
-      pricePerUnit: null,
-      amount: null,
-      pointsAwarded: line.pointsAwarded === null ? null : toSafeNumber(line.pointsAwarded, "Poin setoran"),
+      pricePerUnit: line.pricePerUnit === null ? null : toSafeNumber(line.pricePerUnit, "Tarif rupiah"),
+      amount: line.amount === null ? null : toSafeNumber(line.amount, "Nominal setoran"),
     })),
   };
 }
 
-function mapReward(row) {
-  return {
-    id: row.id,
-    name: row.name,
-    description: row.description,
-    kind: row.kind === "barang" ? "item" : "money",
-    pointsCost: toSafeNumber(row.pointsCost, "Biaya poin"),
-    stock: row.stock === null ? null : Number(row.stock),
-    moneyAmount: row.moneyAmount === null ? null : toSafeNumber(row.moneyAmount, "Nominal uang"),
-    active: Boolean(row.active),
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
-}
-
-function mapRedemption(row) {
+function mapWithdrawal(row) {
   return {
     id: row.id,
     studentId: row.studentId,
-    rewardId: row.rewardId ?? "",
-    rewardName: row.rewardName,
-    kind: row.kind === "barang" ? "item" : "money",
-    pointsCost: toSafeNumber(row.pointsCost, "Biaya poin"),
-    moneyAmount: row.moneyAmount === null ? null : toSafeNumber(row.moneyAmount, "Nominal uang"),
+    amount: toSafeNumber(row.amount, "Nominal pencairan"),
+    destinationType: row.destinationType === "dompet_digital" ? "ewallet" : "bank",
+    institution: row.institution,
+    accountName: row.accountName,
+    accountNumber: row.accountNumber,
     status: ({
       menunggu: "pending",
-      disetujui: "approved",
+      diproses: "processing",
+      dibayar: "paid",
       ditolak: "rejected",
-      selesai: "fulfilled",
       dibatalkan: "cancelled",
     })[row.status],
     note: row.note,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    reviewedBy: row.reviewedBy,
     reviewedAt: row.reviewedAt,
-    fulfilledBy: row.fulfilledBy,
-    fulfilledAt: row.fulfilledAt,
+    reviewedBy: row.reviewedBy,
+    paidAt: row.paidAt,
+    paidBy: row.paidBy,
   };
 }
 
@@ -198,7 +182,7 @@ const wasteSelect = `SELECT
   id,
   nama AS name,
   satuan AS unit,
-  poin_per_satuan AS pointsPerUnit,
+  harga_per_satuan_arsip AS pricePerUnit,
   ikon AS icon,
   url_gambar AS imageUrl,
   tipe_gambar AS imageType,
@@ -218,36 +202,23 @@ const depositSelect = `SELECT
   dibuat_pada AS createdAt
 FROM pengajuan_setoran`;
 
-const rewardSelect = `SELECT
-  id,
-  nama AS name,
-  keterangan AS description,
-  jenis AS kind,
-  poin_dibutuhkan AS pointsCost,
-  stok AS stock,
-  nominal_uang AS moneyAmount,
-  aktif AS active,
-  dibuat_pada AS createdAt,
-  diperbarui_pada AS updatedAt
-FROM katalog_reward`;
-
-const redemptionSelect = `SELECT
+const withdrawalSelect = `SELECT
   id,
   peserta_id AS studentId,
-  reward_id AS rewardId,
-  nama_reward AS rewardName,
-  jenis_reward AS kind,
-  poin_dibutuhkan AS pointsCost,
-  nominal_uang AS moneyAmount,
+  nominal AS amount,
+  jenis_tujuan AS destinationType,
+  lembaga AS institution,
+  nama_pemilik_rekening AS accountName,
+  nomor_rekening AS accountNumber,
   status,
   catatan AS note,
   ditinjau_oleh AS reviewedBy,
   ditinjau_pada AS reviewedAt,
-  diserahkan_oleh AS fulfilledBy,
-  diserahkan_pada AS fulfilledAt,
+  dibayar_oleh AS paidBy,
+  dibayar_pada AS paidAt,
   dibuat_pada AS createdAt,
   diperbarui_pada AS updatedAt
-FROM pengajuan_penukaran`;
+FROM arsip_pengajuan_pencairan`;
 
 async function loadDeposits(connection, account) {
   const manager = account.role === "manager";
@@ -264,7 +235,8 @@ async function loadDeposits(connection, account) {
       rincian_setoran.nama_jenis_sampah AS wasteTypeName,
       rincian_setoran.satuan AS unit,
       NULLIF(rincian_setoran.jumlah, 0) AS quantity,
-      rincian_setoran.poin_didapat AS pointsAwarded
+      rincian_setoran.harga_per_satuan_arsip AS pricePerUnit,
+      rincian_setoran.nominal_arsip AS amount
     FROM rincian_setoran
     WHERE rincian_setoran.setoran_id IN (${placeholders})
     ORDER BY rincian_setoran.id`,
@@ -288,63 +260,70 @@ async function loadDeposits(connection, account) {
   }));
 }
 
-async function loadPoints(connection, account) {
+async function loadWalletEntries(connection, account) {
   const manager = account.role === "manager";
   const [rows] = manager
     ? await connection.query(
-      `SELECT id, peserta_id AS studentId, jumlah AS amount, keterangan AS description,
-        setoran_id AS depositId, pengajuan_penukaran_id AS redemptionId,
+      `SELECT id, peserta_id AS studentId, jenis AS kind, nominal AS amount,
+        keterangan AS description, referensi AS reference, setoran_id AS depositId,
         dibuat_pada AS createdAt, dibuat_oleh AS createdBy
-       FROM transaksi_poin ORDER BY dibuat_pada DESC, id`,
+       FROM arsip_transaksi_saldo ORDER BY dibuat_pada DESC, id`,
     )
     : await connection.execute(
-      `SELECT id, peserta_id AS studentId, jumlah AS amount, keterangan AS description,
-        setoran_id AS depositId, pengajuan_penukaran_id AS redemptionId,
+      `SELECT id, peserta_id AS studentId, jenis AS kind, nominal AS amount,
+        keterangan AS description, referensi AS reference, setoran_id AS depositId,
         dibuat_pada AS createdAt, dibuat_oleh AS createdBy
-       FROM transaksi_poin WHERE peserta_id = ? ORDER BY dibuat_pada DESC, id`,
+       FROM arsip_transaksi_saldo WHERE peserta_id = ? ORDER BY dibuat_pada DESC, id`,
       [account.id],
     );
   return rows.map((row) => ({
     ...row,
-    amount: toSafeNumber(row.amount, "Jumlah poin"),
+    kind: ({
+      setoran: "deposit",
+      penyesuaian: "adjustment",
+      pencairan: "withdrawal",
+      penukaran: "adjustment",
+    })[row.kind],
+    amount: toSafeNumber(row.amount, "Nominal saldo"),
   }));
+}
+
+async function loadWithdrawals(connection, account) {
+  const [rows] = account.role === "manager"
+    ? await connection.query(`${withdrawalSelect} ORDER BY dibuat_pada DESC, id`)
+    : await connection.execute(
+      `${withdrawalSelect} WHERE peserta_id = ? ORDER BY dibuat_pada DESC, id`,
+      [account.id],
+    );
+  return rows.map(mapWithdrawal);
 }
 
 async function loadPreferences(connection, account) {
   const [rows] = await connection.execute(
-    `SELECT akun.notifikasi_dalam_aplikasi AS inAppNotifications,
+    `SELECT
+      akun.notifikasi_dalam_aplikasi AS inAppNotifications,
       (SELECT pengelola.whatsapp FROM akun AS pengelola
        WHERE pengelola.peran = 'pengelola' AND pengelola.aktif = TRUE
-       ORDER BY pengelola.dibuat_pada, pengelola.id LIMIT 1) AS managerWhatsapp,
-      (SELECT rupiah_per_poin FROM pengaturan_bank_sampah WHERE id = 1) AS rupiahPerPoint
-     FROM akun WHERE akun.id = ?`,
+       ORDER BY pengelola.dibuat_pada, pengelola.id LIMIT 1) AS managerWhatsapp
+     FROM akun
+     WHERE akun.id = ?`,
     [account.id],
   );
   if (rows.length === 0) throw new ApiError(404, "ACCOUNT_NOT_FOUND", "Akun tidak ditemukan.");
   return {
     inAppNotifications: Boolean(rows[0].inAppNotifications),
     managerWhatsapp: rows[0].managerWhatsapp ?? "",
-    rupiahPerPoint: rows[0].rupiahPerPoint === null
-      ? null
-      : toSafeNumber(rows[0].rupiahPerPoint, "Nilai rupiah per poin"),
   };
 }
 
 async function loadBusinessData(connection, account) {
   const preferences = await loadPreferences(connection, account);
   const [wasteRows] = await connection.query(`${wasteSelect} ORDER BY nama, id`);
-  const [rewardRows] = account.role === "manager"
-    ? await connection.query(`${rewardSelect} ORDER BY dibuat_pada DESC, id`)
-    : await connection.query(`${rewardSelect} WHERE aktif = TRUE ORDER BY nama, id`);
-  const [redemptionRows] = account.role === "manager"
-    ? await connection.query(`${redemptionSelect} ORDER BY dibuat_pada DESC, id`)
-    : await connection.execute(`${redemptionSelect} WHERE peserta_id = ? ORDER BY dibuat_pada DESC, id`, [account.id]);
   return {
     wasteTypes: wasteRows.map(mapWasteType),
     deposits: await loadDeposits(connection, account),
-    pointEntries: await loadPoints(connection, account),
-    rewards: rewardRows.map(mapReward),
-    redemptionRequests: redemptionRows.map(mapRedemption),
+    walletEntries: await loadWalletEntries(connection, account),
+    withdrawalRequests: await loadWithdrawals(connection, account),
     notifications: preferences.inAppNotifications ? await loadNotifications(connection, account) : [],
     preferences,
   };
@@ -354,53 +333,18 @@ async function loadNotifications(connection, account) {
   const [rows] = await connection.execute(
     `SELECT id, penerima_id AS recipientId, judul AS title, pesan AS message,
       jenis AS kind, id_terkait AS relatedId, dibaca_pada AS readAt, dibuat_pada AS createdAt
-     FROM notifikasi WHERE penerima_id = ? ORDER BY dibuat_pada DESC, id LIMIT 100`,
+     FROM notifikasi
+     WHERE penerima_id = ? AND jenis IN ('setoran', 'saldo', 'sistem')
+     ORDER BY dibuat_pada DESC, id LIMIT 100`,
     [account.id],
   );
   return rows.map((row) => ({
     ...row,
-    kind: ({ setoran: "deposit", poin: "wallet", penukaran: "reward", sistem: "system" })[row.kind],
+    kind: ({ setoran: "deposit", saldo: "wallet", sistem: "system" })[row.kind],
   }));
 }
 
 router.use(requireAuth);
-
-router.get("/ranking/monthly", async (request, response, next) => {
-  if (request.account.role !== "student") {
-    next(new ApiError(403, "FORBIDDEN", "Ranking ini hanya tersedia untuk peserta didik."));
-    return;
-  }
-  try {
-    const [rows] = await pool.query(
-      `SELECT DATE_FORMAT(CURRENT_DATE(), '%Y-%m') AS month,
-        akun.id AS studentId, akun.nama AS name, akun.kelas AS className,
-        COALESCE(SUM(transaksi_poin.jumlah), 0) AS points
-       FROM akun
-       LEFT JOIN transaksi_poin
-         ON transaksi_poin.peserta_id = akun.id
-         AND transaksi_poin.setoran_id IS NOT NULL
-         AND transaksi_poin.jumlah > 0
-         AND transaksi_poin.dibuat_pada >= DATE_FORMAT(CURRENT_DATE(), '%Y-%m-01')
-         AND transaksi_poin.dibuat_pada < DATE_FORMAT(
-           DATE_ADD(CURRENT_DATE(), INTERVAL 1 MONTH), '%Y-%m-01'
-         )
-       WHERE akun.peran = 'peserta' AND akun.aktif = TRUE
-       GROUP BY akun.id, akun.nama, akun.kelas
-       ORDER BY points DESC, akun.nama ASC, akun.id ASC`,
-    );
-    response.json({
-      month: rows[0].month,
-      ranking: rows.map((row) => ({
-        studentId: row.studentId,
-        name: row.name,
-        className: row.className,
-        points: toSafeNumber(row.points, "Poin bulanan"),
-      })),
-    });
-  } catch (error) {
-    next(error);
-  }
-});
 
 router.get("/data", async (request, response, next) => {
   try {
@@ -471,15 +415,15 @@ router.post("/waste-types", requireManager, async (request, response, next) => {
     if (!["kg", "liter"].includes(unit)) {
       throw new ApiError(400, "INVALID_UNIT", "Pilih satuan kg atau liter.");
     }
-    const pointsPerUnit = readInteger(request.body.pointsPerUnit, "Tarif poin", { min: 1 });
+    const pricePerUnit = readInteger(request.body.pricePerUnit, "Tarif rupiah", { min: 1 });
     const icon = readText(request.body.icon ?? "♻️", "Ikon", 24);
     const image = readImage(request.body.image, "Gambar jenis sampah");
     const id = randomUUID();
     await pool.execute(
       `INSERT INTO jenis_sampah
-        (id, nama, satuan, poin_per_satuan, ikon, url_gambar, tipe_gambar, data_gambar, dibuat_oleh)
+        (id, nama, satuan, harga_per_satuan_arsip, ikon, url_gambar, tipe_gambar, data_gambar, dibuat_oleh)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, name, unit, pointsPerUnit, icon, image.url, image.type, image.data, request.account.id],
+      [id, name, unit, pricePerUnit, icon, image.url, image.type, image.data, request.account.id],
     );
     const [rows] = await pool.execute(`${wasteSelect} WHERE id = ?`, [id]);
     response.status(201).json({ wasteType: mapWasteType(rows[0]) });
@@ -500,7 +444,7 @@ router.patch("/waste-types/:id", requireManager, async (request, response, next)
     if (!["kg", "liter"].includes(unit)) {
       throw new ApiError(400, "INVALID_UNIT", "Pilih satuan kg atau liter.");
     }
-    const pointsPerUnit = readInteger(request.body.pointsPerUnit, "Tarif poin", { min: 1 });
+    const pricePerUnit = readInteger(request.body.pricePerUnit, "Tarif rupiah", { min: 1 });
     const icon = readText(request.body.icon ?? "♻️", "Ikon", 24);
     const image = readImage(request.body.image, "Gambar jenis sampah");
     if (typeof request.body.active !== "boolean") {
@@ -508,10 +452,10 @@ router.patch("/waste-types/:id", requireManager, async (request, response, next)
     }
     await pool.execute(
       `UPDATE jenis_sampah
-       SET nama = ?, satuan = ?, poin_per_satuan = ?, ikon = ?, url_gambar = ?,
+       SET nama = ?, satuan = ?, harga_per_satuan_arsip = ?, ikon = ?, url_gambar = ?,
          tipe_gambar = ?, data_gambar = ?, aktif = ?
        WHERE id = ?`,
-      [name, unit, pointsPerUnit, icon, image.url, image.type, image.data, request.body.active, request.params.id],
+      [name, unit, pricePerUnit, icon, image.url, image.type, image.data, request.body.active, request.params.id],
     );
     const [rows] = await pool.execute(`${wasteSelect} WHERE id = ?`, [request.params.id]);
     if (rows.length === 0) {
@@ -531,8 +475,14 @@ router.post("/deposits", async (request, response, next) => {
   let connection;
   try {
     requireObjectBody(request.body);
-    if (!Array.isArray(request.body.wasteTypeIds) || request.body.wasteTypeIds.length < 1 || request.body.wasteTypeIds.length > 20) {
-      throw new ApiError(400, "INVALID_WASTE_TYPES", "Pilih antara 1 sampai 20 jenis sampah.");
+    if (!Array.isArray(request.body.wasteTypeIds) || request.body.wasteTypeIds.length > 20) {
+      throw new ApiError(400, "INVALID_WASTE_TYPES", "Pilih maksimal 20 jenis sampah.");
+    }
+    const otherWasteDescription = request.body.wasteTypeIds.length === 0
+      ? readText(request.body.otherWasteDescription, "Deskripsi jenis sampah", 120)
+      : "";
+    if (request.body.wasteTypeIds.length > 0 && request.body.otherWasteDescription !== undefined) {
+      throw new ApiError(400, "INVALID_WASTE_TYPES", "Deskripsi jenis lain hanya boleh diisi jika tidak memilih jenis katalog.");
     }
     const inputPhotos = request.body.photos ?? [];
     if (!Array.isArray(inputPhotos) || inputPhotos.length > 5) {
@@ -559,12 +509,13 @@ router.post("/deposits", async (request, response, next) => {
     }
     connection = await pool.getConnection();
     await connection.beginTransaction();
-    const placeholders = wasteTypeIds.map(() => "?").join(", ");
-    const [types] = await connection.execute(
-      `SELECT id, nama, satuan FROM jenis_sampah
-       WHERE id IN (${placeholders}) AND aktif = TRUE FOR SHARE`,
-      wasteTypeIds,
-    );
+    const [types] = wasteTypeIds.length > 0
+      ? await connection.execute(
+        `SELECT id, nama, satuan FROM jenis_sampah
+         WHERE id IN (${wasteTypeIds.map(() => "?").join(", ")}) AND aktif = TRUE FOR SHARE`,
+        wasteTypeIds,
+      )
+      : [[]];
     if (types.length !== wasteTypeIds.length) {
       throw new ApiError(409, "WASTE_TYPE_UNAVAILABLE", "Ada jenis sampah yang sudah tidak tersedia.");
     }
@@ -579,6 +530,14 @@ router.post("/deposits", async (request, response, next) => {
           (setoran_id, jenis_sampah_id, nama_jenis_sampah, satuan, jumlah)
          VALUES (?, ?, ?, ?, 0)`,
         [depositId, type.id, type.nama, type.satuan],
+      );
+    }
+    if (otherWasteDescription) {
+      await connection.execute(
+        `INSERT INTO rincian_setoran
+          (setoran_id, jenis_sampah_id, nama_jenis_sampah, satuan, jumlah)
+         VALUES (?, NULL, ?, 'kg', 0)`,
+        [depositId, otherWasteDescription],
       );
     }
     for (const photo of photos) {
@@ -599,11 +558,78 @@ router.post("/deposits", async (request, response, next) => {
     const [rows] = await pool.execute(`${depositSelect} WHERE id = ?`, [depositId]);
     const [lineRows] = await pool.execute(
       `SELECT jenis_sampah_id AS wasteTypeId, nama_jenis_sampah AS wasteTypeName,
-        satuan AS unit, NULLIF(jumlah, 0) AS quantity, poin_didapat AS pointsAwarded
+        satuan AS unit, NULLIF(jumlah, 0) AS quantity,
+        harga_per_satuan_arsip AS pricePerUnit, nominal_arsip AS amount
        FROM rincian_setoran WHERE setoran_id = ? ORDER BY id`,
       [depositId],
     );
     response.status(201).json({ deposit: mapDeposit(rows[0], lineRows) });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    connection?.release();
+  }
+});
+
+router.post("/deposits/direct", requireManager, async (request, response, next) => {
+  let connection;
+  try {
+    requireObjectBody(request.body);
+    const studentId = readText(request.body.studentId, "ID siswa", 36);
+    const wasteTypeId = readText(request.body.wasteTypeId, "Jenis sampah", 36);
+    const quantity = readQuantity(request.body.quantity, "kg");
+    const note = readText(request.body.note ?? "", "Catatan", 500, { optional: true });
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [students] = await connection.execute(
+      "SELECT id FROM akun WHERE id = ? AND peran = 'peserta' AND aktif = TRUE FOR SHARE",
+      [studentId],
+    );
+    if (students.length === 0) {
+      throw new ApiError(404, "STUDENT_NOT_FOUND", "Siswa aktif tidak ditemukan.");
+    }
+    const [types] = await connection.execute(
+      `SELECT id, nama AS wasteName, satuan AS unit, harga_per_satuan_arsip AS pricePerUnit
+       FROM jenis_sampah WHERE id = ? AND aktif = TRUE FOR SHARE`,
+      [wasteTypeId],
+    );
+    const type = types[0];
+    if (!type || type.unit !== "kg") {
+      throw new ApiError(409, "WASTE_TYPE_UNAVAILABLE", "Jenis sampah aktif dengan satuan kg tidak ditemukan.");
+    }
+    const rate = toSafeNumber(type.pricePerUnit, "Tarif rupiah");
+    if (rate <= 0) throw new ApiError(409, "PRICE_UNSET", "Tarif rupiah jenis sampah belum diatur.");
+    const amount = calculateAmount(quantity, rate);
+    if (amount === null || amount < 1) {
+      throw new ApiError(400, "AMOUNT_TOO_LOW", "Nominal setoran harus minimal Rp1.");
+    }
+    const depositId = randomUUID();
+    await connection.execute(
+      `INSERT INTO pengajuan_setoran
+        (id, peserta_id, status, catatan, ditinjau_oleh, ditinjau_pada)
+       VALUES (?, ?, 'disetujui', ?, ?, CURRENT_TIMESTAMP(3))`,
+      [depositId, studentId, note, request.account.id],
+    );
+    await connection.execute(
+      `INSERT INTO rincian_setoran
+        (setoran_id, jenis_sampah_id, nama_jenis_sampah, satuan, jumlah, harga_per_satuan_arsip, nominal_arsip)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [depositId, type.id, type.wasteName, type.unit, quantity, rate, amount],
+    );
+    await connection.execute(
+      `INSERT INTO arsip_transaksi_saldo
+        (id, peserta_id, jenis, nominal, keterangan, setoran_id, dibuat_oleh)
+       VALUES (?, ?, 'setoran', ?, ?, ?, ?)`,
+      [randomUUID(), studentId, amount, `Setoran dicatat pengelola${note ? ` — ${note}` : ""}`, depositId, request.account.id],
+    );
+    await connection.execute(
+      `INSERT INTO notifikasi (id, penerima_id, judul, pesan, jenis, id_terkait)
+       VALUES (?, ?, 'Setoran berhasil dicatat', ?, 'saldo', ?)`,
+      [randomUUID(), studentId, `Setoran ${quantity} kg ${type.wasteName} menambah saldo ${new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(amount)}.`, depositId],
+    );
+    await connection.commit();
+    response.status(201).json({ depositId, amount });
   } catch (error) {
     if (connection) await connection.rollback();
     next(error);
@@ -671,9 +697,9 @@ router.post("/deposits/:id/review", requireManager, async (request, response, ne
       const [lines] = await connection.execute(
         `SELECT rincian_setoran.id, rincian_setoran.jenis_sampah_id AS wasteTypeId,
           jenis_sampah.nama AS wasteName, jenis_sampah.satuan AS unit,
-          jenis_sampah.poin_per_satuan AS pointsPerUnit
+          jenis_sampah.harga_per_satuan_arsip AS pricePerUnit
          FROM rincian_setoran
-         INNER JOIN jenis_sampah ON jenis_sampah.id = rincian_setoran.jenis_sampah_id
+         LEFT JOIN jenis_sampah ON jenis_sampah.id = rincian_setoran.jenis_sampah_id
          WHERE rincian_setoran.setoran_id = ?
          ORDER BY rincian_setoran.id FOR UPDATE`,
         [deposit.id],
@@ -681,35 +707,56 @@ router.post("/deposits/:id/review", requireManager, async (request, response, ne
       if (lines.length !== request.body.lines.length) {
         throw new ApiError(409, "DEPOSIT_LINES_CHANGED", "Rincian setoran sudah berubah. Muat ulang lalu coba lagi.");
       }
-      let totalPoints = 0;
+      let totalAmount = 0;
       const reviewedLines = [];
       for (let index = 0; index < lines.length; index += 1) {
         const savedLine = lines[index];
         const inputLine = request.body.lines[index];
-        if (!inputLine || inputLine.wasteTypeId !== savedLine.wasteTypeId) {
+        if (!inputLine || typeof inputLine.wasteTypeId !== "string" ||
+            (savedLine.wasteTypeId && inputLine.wasteTypeId !== savedLine.wasteTypeId)) {
           throw new ApiError(400, "INVALID_DEPOSIT_LINE", "Jenis sampah pada rincian tidak sesuai.");
         }
-        const quantity = readQuantity(inputLine.quantity, savedLine.unit);
-        const rate = toSafeNumber(savedLine.pointsPerUnit, "Tarif poin");
+        let wasteTypeId = savedLine.wasteTypeId;
+        let wasteName = savedLine.wasteName;
+        let unit = savedLine.unit;
+        let pricePerUnit = savedLine.pricePerUnit;
+        if (!wasteTypeId) {
+          const [mappedTypes] = await connection.execute(
+            `SELECT id, nama AS wasteName, satuan AS unit,
+              harga_per_satuan_arsip AS pricePerUnit
+             FROM jenis_sampah
+             WHERE id = ? AND aktif = TRUE FOR SHARE`,
+            [inputLine.wasteTypeId],
+          );
+          if (mappedTypes.length === 0) {
+            throw new ApiError(409, "WASTE_TYPE_UNAVAILABLE", "Pilih jenis sampah aktif untuk memetakan pengajuan.");
+          }
+          ({ id: wasteTypeId, wasteName, unit, pricePerUnit } = mappedTypes[0]);
+        }
+        const quantity = readQuantity(inputLine.quantity, unit);
+        const rate = pricePerUnit === null
+          ? 0
+          : toSafeNumber(pricePerUnit, "Tarif rupiah");
         if (rate <= 0) {
-          throw new ApiError(409, "POINT_RATE_UNSET", `Tarif poin untuk ${savedLine.wasteName} belum diatur.`);
+          throw new ApiError(409, "PRICE_UNSET", `Tarif rupiah untuk ${wasteName} belum diatur.`);
         }
-        const pointsAwarded = calculatePoints(quantity, rate);
-        if (pointsAwarded === null) {
-          throw new ApiError(400, "POINTS_TOO_LOW", `Jumlah poin untuk ${savedLine.wasteName} harus minimal 1.`);
+        const amount = calculateAmount(quantity, rate);
+        if (amount === null) {
+          throw new ApiError(400, "AMOUNT_OUT_OF_RANGE", `Nominal setoran ${wasteName} melebihi batas.`);
         }
-        totalPoints += pointsAwarded;
-        if (!Number.isSafeInteger(totalPoints)) {
-          throw new ApiError(400, "POINTS_OUT_OF_RANGE", "Total poin setoran melebihi batas.");
+        totalAmount += amount;
+        if (!Number.isSafeInteger(totalAmount)) {
+          throw new ApiError(400, "AMOUNT_OUT_OF_RANGE", "Total nominal setoran melebihi batas.");
         }
-        reviewedLines.push({ id: savedLine.id, rate, quantity, pointsAwarded });
+        reviewedLines.push({ id: savedLine.id, wasteTypeId, wasteName, unit, rate, quantity, amount });
       }
       for (const line of reviewedLines) {
         await connection.execute(
           `UPDATE rincian_setoran
-           SET jumlah = ?, poin_per_satuan = ?, poin_didapat = ?
+           SET jenis_sampah_id = ?, nama_jenis_sampah = ?, satuan = ?,
+             jumlah = ?, harga_per_satuan_arsip = ?, nominal_arsip = ?
            WHERE id = ?`,
-          [line.quantity, line.rate, line.pointsAwarded, line.id],
+          [line.wasteTypeId, line.wasteName, line.unit, line.quantity, line.rate, line.amount, line.id],
         );
       }
       await connection.execute(
@@ -718,16 +765,19 @@ router.post("/deposits/:id/review", requireManager, async (request, response, ne
          WHERE id = ?`,
         [note, request.account.id, deposit.id],
       );
+      if (totalAmount < 1) {
+        throw new ApiError(400, "AMOUNT_TOO_LOW", "Total nominal setoran harus minimal Rp1.");
+      }
       await connection.execute(
-        `INSERT INTO transaksi_poin
-          (id, peserta_id, jenis, jumlah, keterangan, setoran_id, dibuat_oleh)
+        `INSERT INTO arsip_transaksi_saldo
+          (id, peserta_id, jenis, nominal, keterangan, setoran_id, dibuat_oleh)
          VALUES (?, ?, 'setoran', ?, ?, ?, ?)`,
-        [randomUUID(), deposit.studentId, totalPoints, `Setoran disetujui${note ? ` — ${note}` : ""}`, deposit.id, request.account.id],
+        [randomUUID(), deposit.studentId, totalAmount, `Setoran disetujui${note ? ` — ${note}` : ""}`, deposit.id, request.account.id],
       );
       await connection.execute(
         `INSERT INTO notifikasi (id, penerima_id, judul, pesan, jenis, id_terkait)
-         VALUES (?, ?, 'Setoran disetujui', ?, 'poin', ?)`,
-        [randomUUID(), deposit.studentId, `Setoran disetujui dan menghasilkan ${totalPoints} poin.`, deposit.id],
+         VALUES (?, ?, 'Saldo bertambah', ?, 'saldo', ?)`,
+        [randomUUID(), deposit.studentId, `Setoran disetujui dan menambah saldo ${new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(totalAmount)}.`, deposit.id],
       );
     }
     await connection.commit();
@@ -772,22 +822,6 @@ router.patch("/preferences", async (request, response, next) => {
   }
 });
 
-router.patch("/conversion-rate", requireManager, async (request, response, next) => {
-  try {
-    requireObjectBody(request.body);
-    const rupiahPerPoint = readInteger(request.body.rupiahPerPoint, "Nilai rupiah per poin", { min: 1 });
-    await pool.execute(
-      `INSERT INTO pengaturan_bank_sampah (id, rupiah_per_poin, diperbarui_oleh)
-       VALUES (1, ?, ?)
-       ON DUPLICATE KEY UPDATE rupiah_per_poin = ?, diperbarui_oleh = ?`,
-      [rupiahPerPoint, request.account.id, rupiahPerPoint, request.account.id],
-    );
-    response.json({ rupiahPerPoint });
-  } catch (error) {
-    next(error);
-  }
-});
-
 router.patch("/notifications/:id/read", async (request, response, next) => {
   try {
     const [result] = await pool.execute(
@@ -808,114 +842,69 @@ router.patch("/notifications/:id/read", async (request, response, next) => {
   }
 });
 
-function readRewardBody(body, { partial = false } = {}) {
+function readWithdrawalBody(body) {
   requireObjectBody(body);
-  const name = readText(body.name, "Nama reward", 100);
-  const description = readText(body.description ?? "", "Keterangan", 300, { optional: true });
-  const kind = body.kind;
-  if (kind !== "item" && kind !== "money") {
-    throw new ApiError(400, "INVALID_REWARD_KIND", "Jenis reward harus barang atau uang.");
+  const amount = readInteger(body.amount, "Nominal pencairan", { min: 1 });
+  const destinationType = body.destinationType;
+  if (destinationType !== "bank" && destinationType !== "ewallet") {
+    throw new ApiError(400, "INVALID_DESTINATION", "Pilih rekening bank atau e-wallet.");
   }
-  const pointsCost = readInteger(body.pointsCost, "Biaya poin", { min: 1 });
-  const stock = kind === "item" && body.stock !== null && body.stock !== undefined
-    ? readInteger(body.stock, "Stok", { max: 4_294_967_295 })
-    : null;
-  const moneyAmount = kind === "money"
-    ? readInteger(body.moneyAmount, "Nominal reward uang", { min: 1 })
-    : null;
-  if (partial && typeof body.active !== "boolean") {
-    throw new ApiError(400, "INVALID_ACTIVE", "Status reward tidak valid.");
+  const institution = readText(body.institution, "Nama bank atau e-wallet", 60);
+  const accountName = readText(body.accountName, "Nama pemilik rekening", 100);
+  const accountNumber = readText(body.accountNumber, "Nomor rekening", 24);
+  if (!/^[0-9]{6,24}$/.test(accountNumber)) {
+    throw new ApiError(400, "INVALID_ACCOUNT_NUMBER", "Nomor rekening harus terdiri dari 6 sampai 24 angka.");
   }
-  return { name, description, kind: kind === "item" ? "barang" : "uang", pointsCost, stock, moneyAmount, active: body.active ?? true };
+  return {
+    amount,
+    destinationType: destinationType === "bank" ? "bank" : "dompet_digital",
+    institution,
+    accountName,
+    accountNumber,
+  };
 }
 
-router.post("/rewards", requireManager, async (request, response, next) => {
-  try {
-    const reward = readRewardBody(request.body);
-    const id = randomUUID();
-    await pool.execute(
-      `INSERT INTO katalog_reward
-        (id, nama, keterangan, jenis, poin_dibutuhkan, stok, nominal_uang, aktif, dibuat_oleh)
-       VALUES (?, ?, ?, ?, ?, ?, ?, TRUE, ?)`,
-      [id, reward.name, reward.description, reward.kind, reward.pointsCost, reward.stock, reward.moneyAmount, request.account.id],
-    );
-    const [rows] = await pool.execute(`${rewardSelect} WHERE id = ?`, [id]);
-    response.status(201).json({ reward: mapReward(rows[0]) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-router.patch("/rewards/:id", requireManager, async (request, response, next) => {
-  try {
-    const reward = readRewardBody(request.body, { partial: true });
-    await pool.execute(
-      `UPDATE katalog_reward
-       SET nama = ?, keterangan = ?, jenis = ?, poin_dibutuhkan = ?, stok = ?, nominal_uang = ?, aktif = ?
-       WHERE id = ?`,
-      [reward.name, reward.description, reward.kind, reward.pointsCost, reward.stock, reward.moneyAmount, reward.active, request.params.id],
-    );
-    const [rows] = await pool.execute(`${rewardSelect} WHERE id = ?`, [request.params.id]);
-    if (rows.length === 0) {
-      throw new ApiError(404, "REWARD_NOT_FOUND", "Reward tidak ditemukan.");
-    }
-    response.json({ reward: mapReward(rows[0]) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-router.post("/redemptions", async (request, response, next) => {
+router.post("/withdrawals", async (request, response, next) => {
   let connection;
   try {
-    requireObjectBody(request.body);
-    const rewardId = readText(request.body.rewardId, "Reward", 36);
+    if (request.account.role !== "student") {
+      throw new ApiError(403, "FORBIDDEN", "Hanya peserta yang dapat mengajukan pencairan saldo.");
+    }
+    const withdrawal = readWithdrawalBody(request.body);
     connection = await pool.getConnection();
     await connection.beginTransaction();
     await connection.execute("SELECT id FROM akun WHERE id = ? FOR UPDATE", [request.account.id]);
-    const [rewards] = await connection.execute(
-      `SELECT id, nama AS name, jenis AS kind, poin_dibutuhkan AS pointsCost,
-        stok AS stock, nominal_uang AS moneyAmount
-       FROM katalog_reward WHERE id = ? AND aktif = TRUE FOR UPDATE`,
-      [rewardId],
+    const [activeRows] = await connection.execute(
+      "SELECT id FROM arsip_pengajuan_pencairan WHERE peserta_id = ? AND status IN ('menunggu', 'diproses') FOR UPDATE",
+      [request.account.id],
     );
-    const reward = rewards[0];
-    if (!reward) throw new ApiError(404, "REWARD_UNAVAILABLE", "Reward tidak tersedia.");
-    if (reward.stock !== null && reward.stock < 1) {
-      throw new ApiError(409, "REWARD_OUT_OF_STOCK", "Stok reward sedang habis.");
+    if (activeRows.length > 0) {
+      throw new ApiError(409, "WITHDRAWAL_ALREADY_ACTIVE", "Selesaikan atau batalkan pengajuan aktif sebelum membuat yang baru.");
     }
     const [balanceRows] = await connection.execute(
-      `SELECT COALESCE(SUM(jumlah), 0) AS balance
-       FROM transaksi_poin WHERE peserta_id = ?`,
+      "SELECT COALESCE(SUM(nominal), 0) AS balance FROM arsip_transaksi_saldo WHERE peserta_id = ?",
       [request.account.id],
     );
-    const [pendingRows] = await connection.execute(
-      `SELECT COALESCE(SUM(poin_dibutuhkan), 0) AS reserved
-       FROM pengajuan_penukaran WHERE peserta_id = ? AND status = 'menunggu'`,
-      [request.account.id],
-    );
-    const balance = toSafeNumber(balanceRows[0].balance, "Saldo poin");
-    const reserved = toSafeNumber(pendingRows[0].reserved, "Poin tertahan");
-    const pointsCost = toSafeNumber(reward.pointsCost, "Biaya poin");
-    if (balance - reserved < pointsCost) {
-      throw new ApiError(409, "INSUFFICIENT_POINTS", "Poin tersedia tidak cukup untuk menukar reward ini.");
+    const balance = toSafeNumber(balanceRows[0].balance, "Saldo");
+    if (withdrawal.amount > balance) {
+      throw new ApiError(409, "INSUFFICIENT_BALANCE", "Saldo tersedia tidak cukup untuk pengajuan ini.");
     }
     const id = randomUUID();
     await connection.execute(
-      `INSERT INTO pengajuan_penukaran
-        (id, peserta_id, reward_id, nama_reward, jenis_reward, poin_dibutuhkan, nominal_uang)
+      `INSERT INTO arsip_pengajuan_pencairan
+        (id, peserta_id, nominal, jenis_tujuan, lembaga, nama_pemilik_rekening, nomor_rekening)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, request.account.id, reward.id, reward.name, reward.kind, reward.pointsCost, reward.moneyAmount],
+      [id, request.account.id, withdrawal.amount, withdrawal.destinationType, withdrawal.institution, withdrawal.accountName, withdrawal.accountNumber],
     );
     await connection.execute(
       `INSERT INTO notifikasi (id, penerima_id, judul, pesan, jenis, id_terkait)
-       SELECT UUID(), id, 'Pengajuan penukaran reward', ?, 'penukaran', ?
+       SELECT UUID(), id, 'Pengajuan pencairan saldo', ?, 'saldo', ?
        FROM akun WHERE peran = 'pengelola' AND aktif = TRUE`,
-      [`${request.account.name} mengajukan penukaran ${reward.name}.`, id],
+      [`${request.account.name} mengajukan pencairan saldo.`, id],
     );
     await connection.commit();
-    const [rows] = await pool.execute(`${redemptionSelect} WHERE id = ?`, [id]);
-    response.status(201).json({ redemptionRequest: mapRedemption(rows[0]) });
+    const [rows] = await pool.execute(`${withdrawalSelect} WHERE id = ?`, [id]);
+    response.status(201).json({ withdrawalRequest: mapWithdrawal(rows[0]) });
   } catch (error) {
     if (connection) await connection.rollback();
     next(error);
@@ -924,7 +913,73 @@ router.post("/redemptions", async (request, response, next) => {
   }
 });
 
-router.post("/redemptions/:id/review", requireManager, async (request, response, next) => {
+router.patch("/withdrawals/:id", async (request, response, next) => {
+  let connection;
+  try {
+    if (request.account.role !== "student") {
+      throw new ApiError(403, "FORBIDDEN", "Hanya peserta yang dapat mengubah pengajuan pencairan.");
+    }
+    const withdrawal = readWithdrawalBody(request.body);
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    await connection.execute("SELECT id FROM akun WHERE id = ? FOR UPDATE", [request.account.id]);
+    const [requests] = await connection.execute(
+      `SELECT id FROM arsip_pengajuan_pencairan
+       WHERE id = ? AND peserta_id = ? AND status = 'menunggu' FOR UPDATE`,
+      [request.params.id, request.account.id],
+    );
+    if (requests.length === 0) {
+      throw new ApiError(409, "WITHDRAWAL_NOT_EDITABLE", "Pengajuan tidak ditemukan atau sudah diproses.");
+    }
+    const [balanceRows] = await connection.execute(
+      "SELECT COALESCE(SUM(nominal), 0) AS balance FROM arsip_transaksi_saldo WHERE peserta_id = ?",
+      [request.account.id],
+    );
+    const [reservedRows] = await connection.execute(
+      `SELECT COALESCE(SUM(nominal), 0) AS reserved
+       FROM arsip_pengajuan_pencairan
+       WHERE peserta_id = ? AND status IN ('menunggu', 'diproses') AND id <> ?`,
+      [request.account.id, request.params.id],
+    );
+    const available = toSafeNumber(balanceRows[0].balance, "Saldo") -
+      toSafeNumber(reservedRows[0].reserved, "Saldo yang ditahan");
+    if (withdrawal.amount > available) {
+      throw new ApiError(409, "INSUFFICIENT_BALANCE", "Saldo tersedia tidak cukup untuk pengajuan ini.");
+    }
+    await connection.execute(
+      `UPDATE arsip_pengajuan_pencairan
+       SET nominal = ?, jenis_tujuan = ?, lembaga = ?, nama_pemilik_rekening = ?, nomor_rekening = ?
+       WHERE id = ?`,
+      [withdrawal.amount, withdrawal.destinationType, withdrawal.institution, withdrawal.accountName, withdrawal.accountNumber, request.params.id],
+    );
+    await connection.commit();
+    const [rows] = await pool.execute(`${withdrawalSelect} WHERE id = ?`, [request.params.id]);
+    response.json({ withdrawalRequest: mapWithdrawal(rows[0]) });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    connection?.release();
+  }
+});
+
+router.post("/withdrawals/:id/cancel", async (request, response, next) => {
+  try {
+    const [result] = await pool.execute(
+      `UPDATE arsip_pengajuan_pencairan SET status = 'dibatalkan'
+       WHERE id = ? AND peserta_id = ? AND status = 'menunggu'`,
+      [request.params.id, request.account.id],
+    );
+    if (result.affectedRows === 0) {
+      throw new ApiError(409, "WITHDRAWAL_NOT_CANCELLABLE", "Pengajuan tidak ditemukan atau sudah diproses.");
+    }
+    response.json({ message: "Pengajuan pencairan dibatalkan." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/withdrawals/:id/review", requireManager, async (request, response, next) => {
   let connection;
   try {
     requireObjectBody(request.body);
@@ -939,70 +994,48 @@ router.post("/redemptions/:id/review", requireManager, async (request, response,
     connection = await pool.getConnection();
     await connection.beginTransaction();
     const [requests] = await connection.execute(
-      `SELECT id, peserta_id AS studentId, reward_id AS rewardId, nama_reward AS rewardName,
-        poin_dibutuhkan AS pointsCost, status
-       FROM pengajuan_penukaran WHERE id = ? FOR UPDATE`,
+      `SELECT id, peserta_id AS studentId, nominal AS amount, status
+       FROM arsip_pengajuan_pencairan WHERE id = ? FOR UPDATE`,
       [request.params.id],
     );
-    const redemption = requests[0];
-    if (!redemption || redemption.status !== "menunggu") {
-      throw new ApiError(409, "REDEMPTION_ALREADY_REVIEWED", "Pengajuan penukaran tidak ditemukan atau sudah diproses.");
+    const withdrawal = requests[0];
+    if (!withdrawal || withdrawal.status !== "menunggu") {
+      throw new ApiError(409, "WITHDRAWAL_ALREADY_REVIEWED", "Pengajuan tidak ditemukan atau sudah ditinjau.");
     }
-    await connection.execute("SELECT id FROM akun WHERE id = ? FOR UPDATE", [redemption.studentId]);
     if (decision === "approve") {
       const [balanceRows] = await connection.execute(
-        `SELECT COALESCE(SUM(jumlah), 0) AS balance FROM transaksi_poin WHERE peserta_id = ?`,
-        [redemption.studentId],
+        "SELECT COALESCE(SUM(nominal), 0) AS balance FROM arsip_transaksi_saldo WHERE peserta_id = ?",
+        [withdrawal.studentId],
       );
-      const [pendingRows] = await connection.execute(
-        `SELECT COALESCE(SUM(poin_dibutuhkan), 0) AS reserved
-         FROM pengajuan_penukaran WHERE peserta_id = ? AND status = 'menunggu'`,
-        [redemption.studentId],
+      const [reservedRows] = await connection.execute(
+        `SELECT COALESCE(SUM(nominal), 0) AS reserved
+         FROM arsip_pengajuan_pencairan
+         WHERE peserta_id = ? AND status IN ('menunggu', 'diproses') AND id <> ?`,
+        [withdrawal.studentId, withdrawal.id],
       );
-      const balance = toSafeNumber(balanceRows[0].balance, "Saldo poin");
-      const reserved = toSafeNumber(pendingRows[0].reserved, "Poin tertahan");
-      if (balance < reserved) {
-        throw new ApiError(409, "INSUFFICIENT_POINTS", "Saldo poin tidak cukup untuk menyetujui penukaran.");
+      const balance = toSafeNumber(balanceRows[0].balance, "Saldo") -
+        toSafeNumber(reservedRows[0].reserved, "Saldo yang ditahan");
+      const amount = toSafeNumber(withdrawal.amount, "Nominal pencairan");
+      if (amount > balance) {
+        throw new ApiError(409, "INSUFFICIENT_BALANCE", "Saldo tidak cukup untuk menyetujui pencairan.");
       }
-      if (redemption.rewardId) {
-        const [stockResult] = await connection.execute(
-          `UPDATE katalog_reward SET stok = stok - 1
-           WHERE id = ? AND aktif = TRUE AND (stok IS NULL OR stok > 0)`,
-          [redemption.rewardId],
-        );
-        if (stockResult.affectedRows === 0) {
-          throw new ApiError(409, "REWARD_OUT_OF_STOCK", "Stok reward sudah habis.");
-        }
-      }
-      await connection.execute(
-        `INSERT INTO transaksi_poin
-          (id, peserta_id, jenis, jumlah, keterangan, pengajuan_penukaran_id, dibuat_oleh)
-         VALUES (?, ?, 'penukaran', ?, ?, ?, ?)`,
-        [randomUUID(), redemption.studentId, -toSafeNumber(redemption.pointsCost, "Biaya poin"), `Penukaran reward: ${redemption.rewardName}`, redemption.id, request.account.id],
-      );
     }
-    const newStatus = decision === "approve" ? "disetujui" : "ditolak";
+    const status = decision === "approve" ? "diproses" : "ditolak";
     await connection.execute(
-      `UPDATE pengajuan_penukaran
-       SET status = ?, catatan = ?, ditinjau_oleh = ?, ditinjau_pada = CURRENT_TIMESTAMP(3)
-       WHERE id = ?`,
-      [newStatus, note, request.account.id, redemption.id],
+      `UPDATE arsip_pengajuan_pencairan SET status = ?, catatan = ?, ditinjau_oleh = ?,
+        ditinjau_pada = CURRENT_TIMESTAMP(3) WHERE id = ?`,
+      [status, note, request.account.id, withdrawal.id],
     );
     await connection.execute(
       `INSERT INTO notifikasi (id, penerima_id, judul, pesan, jenis, id_terkait)
-       VALUES (?, ?, ?, ?, 'penukaran', ?)`,
-      [
-        randomUUID(),
-        redemption.studentId,
-        decision === "approve" ? "Penukaran disetujui" : "Penukaran ditolak",
-        decision === "approve"
-          ? `Penukaran ${redemption.rewardName} disetujui. Pengelola akan menyerahkan reward secara langsung.`
-          : `Penukaran ${redemption.rewardName} ditolak.${note ? ` Alasan: ${note}` : ""}`,
-        redemption.id,
-      ],
+       VALUES (?, ?, ?, ?, 'saldo', ?)`,
+      [randomUUID(), withdrawal.studentId,
+        decision === "approve" ? "Pencairan disetujui" : "Pencairan ditolak",
+        decision === "approve" ? "Pengajuan pencairan disetujui dan sedang diproses." : `Pengajuan pencairan ditolak.${note ? ` Alasan: ${note}` : ""}`,
+        withdrawal.id],
     );
     await connection.commit();
-    response.json({ message: decision === "approve" ? "Penukaran disetujui." : "Penukaran ditolak." });
+    response.json({ message: decision === "approve" ? "Pencairan disetujui." : "Pencairan ditolak." });
   } catch (error) {
     if (connection) await connection.rollback();
     next(error);
@@ -1011,33 +1044,54 @@ router.post("/redemptions/:id/review", requireManager, async (request, response,
   }
 });
 
-router.post("/redemptions/:id/fulfill", requireManager, async (request, response, next) => {
+router.post("/withdrawals/:id/pay", requireManager, async (request, response, next) => {
   let connection;
   try {
     connection = await pool.getConnection();
     await connection.beginTransaction();
     const [requests] = await connection.execute(
-      `SELECT peserta_id AS studentId, nama_reward AS rewardName, status
-       FROM pengajuan_penukaran WHERE id = ? FOR UPDATE`,
+      `SELECT id, peserta_id AS studentId, nominal AS amount, status
+       FROM arsip_pengajuan_pencairan WHERE id = ? FOR UPDATE`,
       [request.params.id],
     );
-    const redemption = requests[0];
-    if (!redemption || redemption.status !== "disetujui") {
-      throw new ApiError(409, "REDEMPTION_NOT_APPROVED", "Hanya penukaran yang disetujui dapat ditandai selesai.");
+    const withdrawal = requests[0];
+    if (!withdrawal || withdrawal.status !== "diproses") {
+      throw new ApiError(409, "WITHDRAWAL_NOT_PROCESSING", "Hanya pencairan yang disetujui dapat ditandai sudah dibayar.");
+    }
+    const amount = toSafeNumber(withdrawal.amount, "Nominal pencairan");
+    const [balanceRows] = await connection.execute(
+      "SELECT COALESCE(SUM(nominal), 0) AS balance FROM arsip_transaksi_saldo WHERE peserta_id = ?",
+      [withdrawal.studentId],
+    );
+    const [reservedRows] = await connection.execute(
+      `SELECT COALESCE(SUM(nominal), 0) AS reserved
+       FROM arsip_pengajuan_pencairan
+       WHERE peserta_id = ? AND status IN ('menunggu', 'diproses') AND id <> ?`,
+      [withdrawal.studentId, withdrawal.id],
+    );
+    const balance = toSafeNumber(balanceRows[0].balance, "Saldo") -
+      toSafeNumber(reservedRows[0].reserved, "Saldo yang ditahan");
+    if (amount > balance) {
+      throw new ApiError(409, "INSUFFICIENT_BALANCE", "Saldo tidak cukup untuk mencatat pencairan.");
     }
     await connection.execute(
-      `UPDATE pengajuan_penukaran
-       SET status = 'selesai', diserahkan_oleh = ?, diserahkan_pada = CURRENT_TIMESTAMP(3)
+      `UPDATE arsip_pengajuan_pencairan SET status = 'dibayar', dibayar_oleh = ?, dibayar_pada = CURRENT_TIMESTAMP(3)
        WHERE id = ?`,
-      [request.account.id, request.params.id],
+      [request.account.id, withdrawal.id],
+    );
+    await connection.execute(
+      `INSERT INTO arsip_transaksi_saldo
+        (id, peserta_id, jenis, nominal, keterangan, pengajuan_pencairan_id, dibuat_oleh)
+       VALUES (?, ?, 'pencairan', ?, 'Pencairan saldo', ?, ?)`,
+      [randomUUID(), withdrawal.studentId, -amount, withdrawal.id, request.account.id],
     );
     await connection.execute(
       `INSERT INTO notifikasi (id, penerima_id, judul, pesan, jenis, id_terkait)
-       VALUES (?, ?, 'Reward telah diserahkan', ?, 'penukaran', ?)`,
-      [randomUUID(), redemption.studentId, `Reward ${redemption.rewardName} telah ditandai selesai oleh pengelola.`, request.params.id],
+       VALUES (?, ?, 'Saldo dicairkan', 'Pencairan saldo telah ditransfer oleh pengelola.', 'saldo', ?)`,
+      [randomUUID(), withdrawal.studentId, withdrawal.id],
     );
     await connection.commit();
-    response.json({ message: "Reward ditandai telah diserahkan." });
+    response.json({ message: "Pencairan dicatat." });
   } catch (error) {
     if (connection) await connection.rollback();
     next(error);

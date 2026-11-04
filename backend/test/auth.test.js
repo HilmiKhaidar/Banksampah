@@ -163,9 +163,11 @@ test("school-managed accounts, session, profile, password, and logout work with 
   const businessData = await studentBusinessData.json();
   assert.equal(Array.isArray(businessData.wasteTypes), true);
   assert.equal(Array.isArray(businessData.deposits), true);
-  assert.equal(Array.isArray(businessData.pointEntries), true);
-  assert.equal(Array.isArray(businessData.rewards), true);
-  assert.equal(Array.isArray(businessData.redemptionRequests), true);
+  assert.equal(Array.isArray(businessData.walletEntries), true);
+  assert.equal(Array.isArray(businessData.withdrawalRequests), true);
+  assert.equal("pointEntries" in businessData, false);
+  assert.equal("rewards" in businessData, false);
+  assert.equal("redemptionRequests" in businessData, false);
   assert.equal(
     businessData.deposits.every((deposit) => deposit.studentId === studentId),
     true,
@@ -176,7 +178,7 @@ test("school-managed accounts, session, profile, password, and logout work with 
     body: JSON.stringify({
       name: "Student-forbidden waste type",
       unit: "kg",
-      pointsPerUnit: 1,
+      pricePerUnit: 1,
     }),
   });
   assert.equal(forbiddenWasteTypeCreate.status, 403);
@@ -306,6 +308,62 @@ test("school-managed accounts, session, profile, password, and logout work with 
       },
     });
     assert.equal(oldTemporaryLogin.response.status, 401);
+
+    const forbiddenPasswordReset = await request(`/students/${studentId}/reset-password`, {
+      method: "POST",
+      cookie: sessionCookie,
+    });
+    assert.equal(forbiddenPasswordReset.response.status, 403);
+
+    const resetPassword = await request(`/students/${randomUUID()}/reset-password`, {
+      method: "POST",
+      cookie: managerCookie,
+      body: { temporaryPassword: "Password-siswa-baru-123" },
+    });
+    assert.equal(resetPassword.response.status, 404);
+
+    const importedStudentRows = await pool.execute(
+      "SELECT id FROM akun WHERE identitas = ? AND peran = 'peserta' LIMIT 1",
+      [importedIdentifier],
+    );
+    const importedStudentId = importedStudentRows[0][0].id;
+    const invalidResetPassword = await request(`/students/${importedStudentId}/reset-password`, {
+      method: "POST",
+      cookie: managerCookie,
+      body: { temporaryPassword: "short" },
+    });
+    assert.equal(invalidResetPassword.response.status, 400);
+
+    const managerCreatedPassword = "Sandi-reset-pengelola-123";
+    const resetImportedPassword = await request(`/students/${importedStudentId}/reset-password`, {
+      method: "POST",
+      cookie: managerCookie,
+      body: { temporaryPassword: managerCreatedPassword },
+    });
+    assert.equal(resetImportedPassword.response.status, 200);
+    assert.equal(resetImportedPassword.body.credential.identifier, importedIdentifier);
+    assert.equal(resetImportedPassword.body.credential.temporaryPassword, managerCreatedPassword);
+
+    const revokedImportedSession = await request("/session", { cookie: temporaryLogin.cookie });
+    assert.equal(revokedImportedSession.response.status, 401);
+    const previousPasswordLogin = await request("/login", {
+      method: "POST",
+      body: { identifier: importedIdentifier, password: "Siswa-password-baru-123" },
+    });
+    assert.equal(previousPasswordLogin.response.status, 401);
+    const resetTemporaryLogin = await request("/login", {
+      method: "POST",
+      body: {
+        identifier: importedIdentifier,
+        password: resetImportedPassword.body.credential.temporaryPassword,
+      },
+    });
+    assert.equal(resetTemporaryLogin.response.status, 200);
+    assert.equal(resetTemporaryLogin.body.account.passwordChangeRequired, true);
+    const resetPasswordBlocked = await fetch(`${businessBaseUrl}/data`, {
+      headers: { cookie: resetTemporaryLogin.cookie },
+    });
+    assert.equal(resetPasswordBlocked.status, 403);
 
     const duplicateBatch = await request("/students/import", {
       method: "POST",
